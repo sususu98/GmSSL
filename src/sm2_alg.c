@@ -19,6 +19,9 @@
 #include <gmssl/error.h>
 #include <gmssl/endian.h>
 
+#ifdef ENABLE_SM2_NEON
+#include <arm_neon.h>
+#endif
 
 #define sm2_print_bn(label,a) sm2_bn_print(stderr,0,0,label,a) // 这个不应该放在这里，应该放在测试文件中
 
@@ -229,6 +232,59 @@ void sm2_bn_to_bits(const SM2_BN a, char bits[256])
 		}
 	}
 }
+/// @brief SM2_BN >> 1
+/// @param r 
+/// @param a 
+void sm2_div2(SM2_BN r,const SM2_BN a)
+{
+	int i;
+	r[7] = a[7] >> 1;
+	for (i = 6; i >= 0; i--) {
+		r[i] = ((a[i + 1] & 1) << 31) | (a[i] >> 1);
+	}
+}
+/// @brief SM2_BN to 2NAF
+/// @param a SM2_BN
+/// @param bits 
+void sm2_bn_to_NAF(const SM2_BN a, char bits[257])
+{
+	SM2_BN xh, x3,c;
+	int i, j;
+	sm2_div2(xh, a);
+	sm2_bn_add(x3, a, xh);
+	for (i = 0; i < 8;i++) {
+		c[i] = xh[i] ^ x3[i];
+	}
+	SM2_BN np, nm;
+	for(i = 0; i < 8; i++) {
+		np[i] = x3[i] & c[i];
+		nm[i] = xh[i] & c[i];
+	}
+	if(np[7]>>32){
+		bits[256] = '+';
+	}
+	else if (nm[7]>>32){
+		bits[256] = '-';
+	}
+	else{
+		bits[256] = '0';
+	}
+	for (i = 0;i<8;i++){
+		for (j = 0;j<32;j++){
+			if (np[i] & 0x1){
+				bits[32*i+j] = '+';
+			}
+			else if(nm[i] & 0x1){
+				bits[32*i+j] = '-';
+			}
+			else{
+				bits[32*i+j] = '0';
+			}
+			np[i] >>= 1;
+			nm[i] >>= 1;
+		}
+	}
+}
 
 int sm2_bn_cmp(const SM2_BN a, const SM2_BN b)
 {
@@ -383,6 +439,479 @@ void sm2_fp_div2(SM2_Fp r, const SM2_Fp a)
 	}
 	r[i] >>= 1;
 }
+#ifdef ENABLE_SM2_NEON
+/// @brief T=A*B T2=A1*B1
+/// @param T
+/// @param T2
+/// @param A
+/// @param B
+/// @param A1
+/// @param B1
+void mul_256bit_neon(uint32_t *T, uint32_t *T2, const uint64_t *A, const uint64_t *B, const uint64_t *A1, const uint64_t *B1)
+{
+	uint32x2_t b[8], a;
+	uint64x2_t mul[9], mC, l;
+	uint32x2_t t0;
+	uint32_t B2[] = {B[0], B1[0], B[1], B1[1], B[2], B1[2], B[3], B1[3], B[4], B1[4], B[5], B1[5], B[6], B1[6], B[7], B1[7]};
+	uint32_t A2[] = {A[0], A1[0], A[1], A1[1], A[2], A1[2], A[3], A1[3], A[4], A1[4], A[5], A1[5], A[6], A1[6], A[7], A1[7]};
+	uint64_t low[] = {0x00000000FFFFFFFFUL, 0x00000000FFFFFFFFUL};
+	b[0] = vld1_u32(B2);
+	b[1] = vld1_u32(&B2[2]);
+	b[2] = vld1_u32(&B2[4]);
+	b[3] = vld1_u32(&B2[6]);
+	b[4] = vld1_u32(&B2[8]);
+	b[5] = vld1_u32(&B2[10]);
+	b[6] = vld1_u32(&B2[12]);
+	b[7] = vld1_u32(&B2[14]);
+	l = vld1q_u64(low);
+
+	// 1
+	a = vld1_u32(A2);
+	mul[0] = vmull_u32(a, b[0]);
+	mC = vshrq_n_u64(mul[0], 32);
+	mul[1] = vmlal_u32(mC, a, b[1]);
+	mC = vshrq_n_u64(mul[1], 32);
+	mul[2] = vmlal_u32(mC, a, b[2]);
+	mC = vshrq_n_u64(mul[2], 32);
+	mul[3] = vmlal_u32(mC, a, b[3]);
+	mC = vshrq_n_u64(mul[3], 32);
+	mul[4] = vmlal_u32(mC, a, b[4]);
+	mC = vshrq_n_u64(mul[4], 32);
+	mul[5] = vmlal_u32(mC, a, b[5]);
+	mC = vshrq_n_u64(mul[5], 32);
+	mul[6] = vmlal_u32(mC, a, b[6]);
+	mC = vshrq_n_u64(mul[6], 32);
+	mul[7] = vmlal_u32(mC, a, b[7]);
+	mul[8] = vshrq_n_u64(mul[7], 32);
+	t0 = vmovn_u64(mul[0]);
+	T[0] = vget_lane_u32(t0, 0);
+	T2[0] = vget_lane_u32(t0, 1);
+
+	// 2
+	a = vld1_u32(&A2[2]);
+	mul[0] = vandq_u64(mul[0], l);
+	mul[1] = vandq_u64(mul[1], l);
+	mul[2] = vandq_u64(mul[2], l);
+	mul[3] = vandq_u64(mul[3], l);
+	mul[4] = vandq_u64(mul[4], l);
+	mul[5] = vandq_u64(mul[5], l);
+	mul[6] = vandq_u64(mul[6], l);
+	mul[7] = vandq_u64(mul[7], l);
+	mul[0] = vmlal_u32(mul[1], a, b[0]);
+	mC = vshrq_n_u64(mul[0], 32);
+	mul[1] = vmlal_u32(mul[2], a, b[1]);
+	mul[1] = vaddq_u64(mul[1], mC);
+	mC = vshrq_n_u64(mul[1], 32);
+	mul[2] = vmlal_u32(mul[3], a, b[2]);
+	mul[2] = vaddq_u64(mul[2], mC);
+	mC = vshrq_n_u64(mul[2], 32);
+	mul[3] = vmlal_u32(mul[4], a, b[3]);
+	mul[3] = vaddq_u64(mul[3], mC);
+	mC = vshrq_n_u64(mul[3], 32);
+	mul[4] = vmlal_u32(mul[5], a, b[4]);
+	mul[4] = vaddq_u64(mul[4], mC);
+	mC = vshrq_n_u64(mul[4], 32);
+	mul[5] = vmlal_u32(mul[6], a, b[5]);
+	mul[5] = vaddq_u64(mul[5], mC);
+	mC = vshrq_n_u64(mul[5], 32);
+	mul[6] = vmlal_u32(mul[7], a, b[6]);
+	mul[6] = vaddq_u64(mul[6], mC);
+	mC = vshrq_n_u64(mul[6], 32);
+	mul[7] = vmlal_u32(mul[8], a, b[7]);
+	mul[7] = vaddq_u64(mul[7], mC);
+	mul[8] = vshrq_n_u64(mul[7], 32);
+	t0 = vmovn_u64(mul[0]);
+	T[1] = vget_lane_u32(t0, 0);
+	T2[1] = vget_lane_u32(t0, 1);
+
+	// 3
+	a = vld1_u32(&A2[4]);
+	mul[0] = vandq_u64(mul[0], l);
+	mul[1] = vandq_u64(mul[1], l);
+	mul[2] = vandq_u64(mul[2], l);
+	mul[3] = vandq_u64(mul[3], l);
+	mul[4] = vandq_u64(mul[4], l);
+	mul[5] = vandq_u64(mul[5], l);
+	mul[6] = vandq_u64(mul[6], l);
+	mul[7] = vandq_u64(mul[7], l);
+	mul[0] = vmlal_u32(mul[1], a, b[0]);
+	mC = vshrq_n_u64(mul[0], 32);
+	mul[1] = vmlal_u32(mul[2], a, b[1]);
+	mul[1] = vaddq_u64(mul[1], mC);
+	mC = vshrq_n_u64(mul[1], 32);
+	mul[2] = vmlal_u32(mul[3], a, b[2]);
+	mul[2] = vaddq_u64(mul[2], mC);
+	mC = vshrq_n_u64(mul[2], 32);
+	mul[3] = vmlal_u32(mul[4], a, b[3]);
+	mul[3] = vaddq_u64(mul[3], mC);
+	mC = vshrq_n_u64(mul[3], 32);
+	mul[4] = vmlal_u32(mul[5], a, b[4]);
+	mul[4] = vaddq_u64(mul[4], mC);
+	mC = vshrq_n_u64(mul[4], 32);
+	mul[5] = vmlal_u32(mul[6], a, b[5]);
+	mul[5] = vaddq_u64(mul[5], mC);
+	mC = vshrq_n_u64(mul[5], 32);
+	mul[6] = vmlal_u32(mul[7], a, b[6]);
+	mul[6] = vaddq_u64(mul[6], mC);
+	mC = vshrq_n_u64(mul[6], 32);
+	mul[7] = vmlal_u32(mul[8], a, b[7]);
+	mul[7] = vaddq_u64(mul[7], mC);
+	mul[8] = vshrq_n_u64(mul[7], 32);
+	t0 = vmovn_u64(mul[0]);
+	T[2] = vget_lane_u32(t0, 0);
+	T2[2] = vget_lane_u32(t0, 1);
+
+	// 4
+	a = vld1_u32(&A2[6]);
+	mul[0] = vandq_u64(mul[0], l);
+	mul[1] = vandq_u64(mul[1], l);
+	mul[2] = vandq_u64(mul[2], l);
+	mul[3] = vandq_u64(mul[3], l);
+	mul[4] = vandq_u64(mul[4], l);
+	mul[5] = vandq_u64(mul[5], l);
+	mul[6] = vandq_u64(mul[6], l);
+	mul[7] = vandq_u64(mul[7], l);
+	mul[0] = vmlal_u32(mul[1], a, b[0]);
+	mC = vshrq_n_u64(mul[0], 32);
+	mul[1] = vmlal_u32(mul[2], a, b[1]);
+	mul[1] = vaddq_u64(mul[1], mC);
+	mC = vshrq_n_u64(mul[1], 32);
+	mul[2] = vmlal_u32(mul[3], a, b[2]);
+	mul[2] = vaddq_u64(mul[2], mC);
+	mC = vshrq_n_u64(mul[2], 32);
+	mul[3] = vmlal_u32(mul[4], a, b[3]);
+	mul[3] = vaddq_u64(mul[3], mC);
+	mC = vshrq_n_u64(mul[3], 32);
+	mul[4] = vmlal_u32(mul[5], a, b[4]);
+	mul[4] = vaddq_u64(mul[4], mC);
+	mC = vshrq_n_u64(mul[4], 32);
+	mul[5] = vmlal_u32(mul[6], a, b[5]);
+	mul[5] = vaddq_u64(mul[5], mC);
+	mC = vshrq_n_u64(mul[5], 32);
+	mul[6] = vmlal_u32(mul[7], a, b[6]);
+	mul[6] = vaddq_u64(mul[6], mC);
+	mC = vshrq_n_u64(mul[6], 32);
+	mul[7] = vmlal_u32(mul[8], a, b[7]);
+	mul[7] = vaddq_u64(mul[7], mC);
+	mul[8] = vshrq_n_u64(mul[7], 32);
+	t0 = vmovn_u64(mul[0]);
+	T[3] = vget_lane_u32(t0, 0);
+	T2[3] = vget_lane_u32(t0, 1);
+
+	// 5
+	a = vld1_u32(&A2[8]);
+	mul[0] = vandq_u64(mul[0], l);
+	mul[1] = vandq_u64(mul[1], l);
+	mul[2] = vandq_u64(mul[2], l);
+	mul[3] = vandq_u64(mul[3], l);
+	mul[4] = vandq_u64(mul[4], l);
+	mul[5] = vandq_u64(mul[5], l);
+	mul[6] = vandq_u64(mul[6], l);
+	mul[7] = vandq_u64(mul[7], l);
+	mul[0] = vmlal_u32(mul[1], a, b[0]);
+	mC = vshrq_n_u64(mul[0], 32);
+	mul[1] = vmlal_u32(mul[2], a, b[1]);
+	mul[1] = vaddq_u64(mul[1], mC);
+	mC = vshrq_n_u64(mul[1], 32);
+	mul[2] = vmlal_u32(mul[3], a, b[2]);
+	mul[2] = vaddq_u64(mul[2], mC);
+	mC = vshrq_n_u64(mul[2], 32);
+	mul[3] = vmlal_u32(mul[4], a, b[3]);
+	mul[3] = vaddq_u64(mul[3], mC);
+	mC = vshrq_n_u64(mul[3], 32);
+	mul[4] = vmlal_u32(mul[5], a, b[4]);
+	mul[4] = vaddq_u64(mul[4], mC);
+	mC = vshrq_n_u64(mul[4], 32);
+	mul[5] = vmlal_u32(mul[6], a, b[5]);
+	mul[5] = vaddq_u64(mul[5], mC);
+	mC = vshrq_n_u64(mul[5], 32);
+	mul[6] = vmlal_u32(mul[7], a, b[6]);
+	mul[6] = vaddq_u64(mul[6], mC);
+	mC = vshrq_n_u64(mul[6], 32);
+	mul[7] = vmlal_u32(mul[8], a, b[7]);
+	mul[7] = vaddq_u64(mul[7], mC);
+	mul[8] = vshrq_n_u64(mul[7], 32);
+	t0 = vmovn_u64(mul[0]);
+	T[4] = vget_lane_u32(t0, 0);
+	T2[4] = vget_lane_u32(t0, 1);
+
+	// 6
+	a = vld1_u32(&A2[10]);
+	mul[0] = vandq_u64(mul[0], l);
+	mul[1] = vandq_u64(mul[1], l);
+	mul[2] = vandq_u64(mul[2], l);
+	mul[3] = vandq_u64(mul[3], l);
+	mul[4] = vandq_u64(mul[4], l);
+	mul[5] = vandq_u64(mul[5], l);
+	mul[6] = vandq_u64(mul[6], l);
+	mul[7] = vandq_u64(mul[7], l);
+	mul[0] = vmlal_u32(mul[1], a, b[0]);
+	mC = vshrq_n_u64(mul[0], 32);
+	mul[1] = vmlal_u32(mul[2], a, b[1]);
+	mul[1] = vaddq_u64(mul[1], mC);
+	mC = vshrq_n_u64(mul[1], 32);
+	mul[2] = vmlal_u32(mul[3], a, b[2]);
+	mul[2] = vaddq_u64(mul[2], mC);
+	mC = vshrq_n_u64(mul[2], 32);
+	mul[3] = vmlal_u32(mul[4], a, b[3]);
+	mul[3] = vaddq_u64(mul[3], mC);
+	mC = vshrq_n_u64(mul[3], 32);
+	mul[4] = vmlal_u32(mul[5], a, b[4]);
+	mul[4] = vaddq_u64(mul[4], mC);
+	mC = vshrq_n_u64(mul[4], 32);
+	mul[5] = vmlal_u32(mul[6], a, b[5]);
+	mul[5] = vaddq_u64(mul[5], mC);
+	mC = vshrq_n_u64(mul[5], 32);
+	mul[6] = vmlal_u32(mul[7], a, b[6]);
+	mul[6] = vaddq_u64(mul[6], mC);
+	mC = vshrq_n_u64(mul[6], 32);
+	mul[7] = vmlal_u32(mul[8], a, b[7]);
+	mul[7] = vaddq_u64(mul[7], mC);
+	mul[8] = vshrq_n_u64(mul[7], 32);
+	t0 = vmovn_u64(mul[0]);
+	T[5] = vget_lane_u32(t0, 0);
+	T2[5] = vget_lane_u32(t0, 1);
+
+	// 7
+	a = vld1_u32(&A2[12]);
+	mul[0] = vandq_u64(mul[0], l);
+	mul[1] = vandq_u64(mul[1], l);
+	mul[2] = vandq_u64(mul[2], l);
+	mul[3] = vandq_u64(mul[3], l);
+	mul[4] = vandq_u64(mul[4], l);
+	mul[5] = vandq_u64(mul[5], l);
+	mul[6] = vandq_u64(mul[6], l);
+	mul[7] = vandq_u64(mul[7], l);
+	mul[0] = vmlal_u32(mul[1], a, b[0]);
+	mC = vshrq_n_u64(mul[0], 32);
+	mul[1] = vmlal_u32(mul[2], a, b[1]);
+	mul[1] = vaddq_u64(mul[1], mC);
+	mC = vshrq_n_u64(mul[1], 32);
+	mul[2] = vmlal_u32(mul[3], a, b[2]);
+	mul[2] = vaddq_u64(mul[2], mC);
+	mC = vshrq_n_u64(mul[2], 32);
+	mul[3] = vmlal_u32(mul[4], a, b[3]);
+	mul[3] = vaddq_u64(mul[3], mC);
+	mC = vshrq_n_u64(mul[3], 32);
+	mul[4] = vmlal_u32(mul[5], a, b[4]);
+	mul[4] = vaddq_u64(mul[4], mC);
+	mC = vshrq_n_u64(mul[4], 32);
+	mul[5] = vmlal_u32(mul[6], a, b[5]);
+	mul[5] = vaddq_u64(mul[5], mC);
+	mC = vshrq_n_u64(mul[5], 32);
+	mul[6] = vmlal_u32(mul[7], a, b[6]);
+	mul[6] = vaddq_u64(mul[6], mC);
+	mC = vshrq_n_u64(mul[6], 32);
+	mul[7] = vmlal_u32(mul[8], a, b[7]);
+	mul[7] = vaddq_u64(mul[7], mC);
+	mul[8] = vshrq_n_u64(mul[7], 32);
+	t0 = vmovn_u64(mul[0]);
+	T[6] = vget_lane_u32(t0, 0);
+	T2[6] = vget_lane_u32(t0, 1);
+
+	// 8
+	a = vld1_u32(&A2[14]);
+	mul[0] = vandq_u64(mul[0], l);
+	mul[1] = vandq_u64(mul[1], l);
+	mul[2] = vandq_u64(mul[2], l);
+	mul[3] = vandq_u64(mul[3], l);
+	mul[4] = vandq_u64(mul[4], l);
+	mul[5] = vandq_u64(mul[5], l);
+	mul[6] = vandq_u64(mul[6], l);
+	mul[7] = vandq_u64(mul[7], l);
+	mul[0] = vmlal_u32(mul[1], a, b[0]);
+	mC = vshrq_n_u64(mul[0], 32);
+	mul[1] = vmlal_u32(mul[2], a, b[1]);
+	mul[1] = vaddq_u64(mul[1], mC);
+	mC = vshrq_n_u64(mul[1], 32);
+	mul[2] = vmlal_u32(mul[3], a, b[2]);
+	mul[2] = vaddq_u64(mul[2], mC);
+	mC = vshrq_n_u64(mul[2], 32);
+	mul[3] = vmlal_u32(mul[4], a, b[3]);
+	mul[3] = vaddq_u64(mul[3], mC);
+	mC = vshrq_n_u64(mul[3], 32);
+	mul[4] = vmlal_u32(mul[5], a, b[4]);
+	mul[4] = vaddq_u64(mul[4], mC);
+	mC = vshrq_n_u64(mul[4], 32);
+	mul[5] = vmlal_u32(mul[6], a, b[5]);
+	mul[5] = vaddq_u64(mul[5], mC);
+	mC = vshrq_n_u64(mul[5], 32);
+	mul[6] = vmlal_u32(mul[7], a, b[6]);
+	mul[6] = vaddq_u64(mul[6], mC);
+	mC = vshrq_n_u64(mul[6], 32);
+	mul[7] = vmlal_u32(mul[8], a, b[7]);
+	mul[7] = vaddq_u64(mul[7], mC);
+	mul[8] = vshrq_n_u64(mul[7], 32);
+	t0 = vmovn_u64(mul[0]);
+	T[7] = vget_lane_u32(t0, 0);
+	T2[7] = vget_lane_u32(t0, 1);
+
+	b[0] = vmovn_u64(mul[1]);
+	b[1] = vmovn_u64(mul[2]);
+	b[2] = vmovn_u64(mul[3]);
+	b[3] = vmovn_u64(mul[4]);
+	b[4] = vmovn_u64(mul[5]);
+	b[5] = vmovn_u64(mul[6]);
+	b[6] = vmovn_u64(mul[7]);
+	b[7] = vmovn_u64(mul[8]);
+
+	T[8] = vget_lane_u32(b[0], 0);
+	T2[8] = vget_lane_u32(b[0], 1);
+	T[9] = vget_lane_u32(b[1], 0);
+	T2[9] = vget_lane_u32(b[1], 1);
+	T[10] = vget_lane_u32(b[2], 0);
+	T2[10] = vget_lane_u32(b[2], 1);
+	T[11] = vget_lane_u32(b[3], 0);
+	T2[11] = vget_lane_u32(b[3], 1);
+	T[12] = vget_lane_u32(b[4], 0);
+	T2[12] = vget_lane_u32(b[4], 1);
+	T[13] = vget_lane_u32(b[5], 0);
+	T2[13] = vget_lane_u32(b[5], 1);
+	T[14] = vget_lane_u32(b[6], 0);
+	T2[14] = vget_lane_u32(b[6], 1);
+	T[15] = vget_lane_u32(b[7], 0);
+	T2[15] = vget_lane_u32(b[7], 1);
+}
+
+void sm2_fp_mul_neon(SM2_Fp r1, SM2_Fp r2, const SM2_Fp a1, const SM2_Fp b1, const SM2_Fp a2, const SM2_Fp b2)
+{
+	int i;
+	uint64_t s1[16] = {0};
+	uint64_t s2[16] = {0};
+	SM2_BN d1 = {0};
+	SM2_BN d2 = {0};
+	uint32_t s10[16] = {0};
+	uint32_t s20[16] = {0};
+
+	mul_256bit_neon(s10, s20, a1, b1, a2, b2);
+	for (i = 0; i < 16; i++)
+	{
+		s1[i] = s10[i];
+		s2[i] = s20[i];
+	}
+	sm2_512bit_modp(r1, s1);
+	sm2_512bit_modp(r2, s2);
+}
+
+void sm2_fp_sqr_neon(SM2_Fp r1, SM2_Fp r2, const SM2_Fp a1, const SM2_Fp a2)
+{
+	sm2_fp_mul_neon(r1, r2, a1, a1, a2, a2);
+}
+#endif
+
+/// @brief r = c mod p
+/// @param r
+/// @param a
+void sm2_512bit_modp(SM2_Fp r, const uint64_t a[16])
+{
+    uint32_t t[8] = {0};
+    uint64_t r0[4] = {0};
+    uint64_t temp = 0;
+    uint64_t temp0[4] = {0} ;
+    uint64_t rcx = a[8] + a[9] + a[10] + a[11];
+    uint64_t r8 = a[8] + a[13];  // r8=a8+a13
+    uint64_t r9 = a[9] + a[14];  // r9=a9+a14
+    uint64_t r14 = a[14] + a[15]; // r14=a14+a15
+    uint64_t r13 = a[13] + r14;  // r13=a13+a14+a15
+    uint64_t r12 = a[12] + r13;  // r12=a12+a13+a14+a15
+    rcx += r12;                  // rcx=a8+a9+a10+a11+a12+a13+a14+a15
+    uint64_t carry;
+    int carry_flag;
+    // a0+(a8+a9+a10+a11+a12+a13+a14+a15)+(a13+a14+a15)
+    temp = a[0] + rcx + r13;
+    t[0] = temp & 0xffffffff;
+    carry = temp >> 32;
+
+    // carry+a1+(a8+a9+a10+a11+a12+a13+a14+a15)+(a13+a14+a15)-(a8+a13)
+    temp = carry + a[1] + rcx + r13 - r8;
+    t[1] = temp & 0xffffffff;
+    carry = temp >> 32;
+
+    // carry+a2+0x400000000-(a8+a13)-(a9+a14) 这里需要处理借位问题
+    temp = carry + a[2] + 0x400000000 - r8 - r9;
+    t[2] = temp & 0xffffffff;
+    carry = temp >> 32;
+
+    // carry+a3+(a12+a13+a14+a15)+(a8+a13)+a11+0xfffffffc
+    temp = carry + a[3] + r12 + r8 + a[11] + 0xfffffffc;
+    t[3] = temp & 0xffffffff;
+    carry = temp >> 32;
+
+    // carry+a4+(a12+a13+a14+a15)+(a9+a14)-1
+    temp = carry + a[4] + r12 + r9 - 1;
+    t[4] = temp & 0xffffffff;
+    carry = temp >> 32;
+
+    // carry+a5+(a13+a14+a15)+a10+a15
+    temp = carry + a[5] + r13 + a[10] + a[15];
+    t[5] = temp & 0xffffffff;
+    carry = temp >> 32;
+
+    // carry+a6+a11+(a14+a15)
+    temp = carry + a[6] + a[11] + r14;
+    t[6] = temp & 0xffffffff;
+    carry = temp >> 32;
+
+    // carry+a7+(a12+a13+a14+a15)
+    temp = carry + a[7] + rcx + r12 + a[15];
+    t[7] = temp & 0xffffffff;
+    carry = temp >> 32;
+
+    // n * p
+    r0[0] = -carry - 1;          	//r12 = -n
+    r0[2] = ~0;  					//r14 = !0
+    r0[3] = (carry + 1) << 32;      //r15 = (n << 32)
+    r0[1] = carry - r0[3];        	//r13 = (n - 1) - (n << 32)
+    r0[3] = ~(r0[3]);             	//r15 = !(n << 32)
+
+
+    carry_flag = 0;
+    for(int i = 0 ; i < 4 ; i++)
+    {
+        temp0[i] = ((uint64_t)t[2*i + 1] << 32) | t[2*i];
+        if(temp0[i] == 0 || temp0[i] - carry_flag < r0[i])
+        {
+            temp0[i] = temp0[i] - carry_flag - r0[i];
+            carry_flag = 1;
+        }
+        else
+        {
+            temp0[i] = temp0[i] - carry_flag - r0[i];
+            carry_flag = 0;
+        }
+    }
+
+    r0[0] = 0xffffffffffffffff;
+    r0[1] = 0xffffffff00000000;
+    r0[2] = 0xffffffffffffffff;
+    r0[3] = 0xfffffffeffffffff;
+
+    if(carry_flag == 1)
+    {
+        carry_flag = 0;
+        for(int i = 0 ; i < 4 ; i++)
+        {
+            temp = temp0[i] + r0[i] + carry_flag;
+            if(temp <= temp0[i] || temp <= r0[i])
+            {
+				temp0[i] = temp;
+                carry_flag = 1;
+            }
+            else
+            {
+				temp0[i] = temp;
+                carry_flag = 0;
+            }
+        }
+    }
+
+    for(int i = 0 ; i < 4 ; i++)
+    {
+        r[2*i] = temp0[i] & 0xffffffff;
+        r[2*i + 1] = temp0[i] >> 32;
+    }
+
+}
 
 void sm2_fp_neg(SM2_Fp r, const SM2_Fp a)
 {
@@ -399,7 +928,6 @@ void sm2_fp_mul(SM2_Fp r, const SM2_Fp a, const SM2_Fp b)
 	uint64_t s[16] = {0};
 	SM2_BN d = {0};
 	uint64_t u;
-
 	// s = a * b
 	for (i = 0; i < 8; i++) {
 		u = 0;
@@ -410,30 +938,7 @@ void sm2_fp_mul(SM2_Fp r, const SM2_Fp a, const SM2_Fp b)
 		}
 		s[i + 8] = u;
 	}
-
-	r[0] = s[0] + s[ 8] + s[ 9] + s[10] + s[11] + s[12] + ((s[13] + s[14] + s[15]) << 1);
-	r[1] = s[1] + s[ 9] + s[10] + s[11] + s[12] + s[13] + ((s[14] + s[15]) << 1);
-	r[2] = s[2];
-	r[3] = s[3] + s[ 8] + s[11] + s[12] + s[14] + s[15] + (s[13] << 1);
-	r[4] = s[4] + s[ 9] + s[12] + s[13] + s[15] + (s[14] << 1);
-	r[5] = s[5] + s[10] + s[13] + s[14] + (s[15] << 1);
-	r[6] = s[6] + s[11] + s[14] + s[15];
-	r[7] = s[7] + s[ 8] + s[ 9] + s[10] + s[11] + s[15] + ((s[12] + s[13] + s[14] + s[15]) << 1);
-
-	for (i = 1; i < 8; i++) {
-		r[i] += r[i - 1] >> 32;
-		r[i - 1] &= 0xffffffff;
-	}
-
-	d[2] = s[8] + s[9] + s[13] + s[14];
-	d[3] = d[2] >> 32;
-	d[2] &= 0xffffffff;
-	sm2_bn_sub(r, r, d);
-
-	// max times ?
-	while (sm2_bn_cmp(r, SM2_P) >= 0) {
-		sm2_bn_sub(r, r, SM2_P);
-	}
+	 sm2_512bit_modp(r, s);
 }
 
 void sm2_fp_sqr(SM2_Fp r, const SM2_Fp a)
@@ -897,6 +1402,22 @@ void sm2_jacobian_point_dbl(SM2_JACOBIAN_POINT *R, const SM2_JACOBIAN_POINT *P)
 		return;
 	}
 
+#ifdef ENABLE_SM2_NEON
+	SM2_BN T4;
+	sm2_fp_dbl(Y3, Y1);                          //Y3 = 2 * Y1
+	sm2_fp_sqr_neon(T1, T4, Z1, Y3);           	//T1 = Z1^2 ; T4 = Y3^2
+	sm2_fp_sub(T2, X1, T1);	                    //T2 = X1 - T1
+	sm2_fp_add(T1, X1, T1);	                    //T1 = X1 + T1
+	sm2_fp_mul_neon(T2, Z3, T2, T1, Y3, Z1);     //T2 = T2 * T1 ; Z3 = Y3 * Z1
+	sm2_fp_tri(T2, T2);			                //T2 = 3 * T2
+	sm2_fp_mul_neon(T3, X3, T4, X1, T2, T2);     //T3 = T4 * X1 ; X3 = T2^2
+	sm2_fp_dbl(T1, T3);		                    //T1 = 2 * T3
+	sm2_fp_sub(X3, X3, T1);	                    //X3 = X3 - T1
+	sm2_fp_sub(T1, T3, X3);	                    //T1 = T3 - X3
+	sm2_fp_mul_neon(Y3, T1, T4, T4, T1, T2);	    //Y3 = T4^2 ; T1 = T1 * T2
+	sm2_fp_div2(Y3, Y3);                         //Y3 = Y3/2
+	sm2_fp_sub(Y3, T1, Y3);	                    //Y3 = T1 - Y3
+#else
 	sm2_fp_sqr(T1, Z1);		//printf("T1 = Z1^2    = "); print_bn(T1);
 	sm2_fp_sub(T2, X1, T1);	//printf("T2 = X1 - T1 = "); print_bn(T2);
 	sm2_fp_add(T1, X1, T1);	//printf("T1 = X1 + T1 = "); print_bn(T1);
@@ -914,7 +1435,7 @@ void sm2_jacobian_point_dbl(SM2_JACOBIAN_POINT *R, const SM2_JACOBIAN_POINT *P)
 	sm2_fp_sub(T1, T3, X3);	//printf("T1 = T3 - X3 = "); print_bn(T1);
 	sm2_fp_mul(T1, T1, T2);	//printf("T1 = T1 * T2 = "); print_bn(T1);
 	sm2_fp_sub(Y3, T1, Y3);	//printf("Y3 = T1 - Y3 = "); print_bn(Y3);
-
+#endif
 	sm2_bn_copy(R->X, X3);
 	sm2_bn_copy(R->Y, Y3);
 	sm2_bn_copy(R->Z, Z3);
@@ -952,6 +1473,39 @@ void sm2_jacobian_point_add(SM2_JACOBIAN_POINT *R, const SM2_JACOBIAN_POINT *P, 
 
 	assert(sm2_bn_is_one(Q->Z));
 
+#ifdef ENABLE_SM2_NEON
+	SM2_BN T5;
+	SM2_BN T6;
+	sm2_fp_sqr(T1, Z1);
+	sm2_fp_mul_neon(T2, T5, T1, Z1, T1, x2);   //T2 = T1 * Z1 , T5 = T1 *x2
+	sm2_fp_sub(T1, T5, X1);
+	sm2_fp_mul_neon(T2, Z3, T2, y2, Z1, T1);
+	sm2_fp_sub(T2, T2, Y1);
+	if (sm2_bn_is_zero(T1)) {
+		if (sm2_bn_is_zero(T2)) {
+			SM2_JACOBIAN_POINT _Q, *Q = &_Q;
+			sm2_jacobian_point_set_xy(Q, x2, y2);
+
+			sm2_jacobian_point_dbl(R, Q);
+			return;
+		} else {
+			sm2_jacobian_point_set_infinity(R);
+			return;
+		}
+	}
+	sm2_fp_sqr_neon(T3, X3, T1, T2);       //T3 = T1^2 , X3 = T2^2
+	sm2_fp_mul_neon(T4, T6, T3, T1, T3, X1);
+	sm2_fp_dbl(T1, T6);
+	sm2_fp_sub(X3, X3, T1);
+	sm2_fp_sub(X3, X3, T4);
+	sm2_fp_sub(T3, T6, X3);
+	sm2_fp_mul_neon(T3, T4, T3, T2, T4, Y1);
+	sm2_fp_sub(Y3, T3, T4);
+
+	sm2_bn_copy(R->X, X3);
+	sm2_bn_copy(R->Y, Y3);
+	sm2_bn_copy(R->Z, Z3);
+#else
 	sm2_fp_sqr(T1, Z1);
 	sm2_fp_mul(T2, T1, Z1);
 	sm2_fp_mul(T1, T1, x2);
@@ -986,6 +1540,7 @@ void sm2_jacobian_point_add(SM2_JACOBIAN_POINT *R, const SM2_JACOBIAN_POINT *P, 
 	sm2_bn_copy(R->X, X3);
 	sm2_bn_copy(R->Y, Y3);
 	sm2_bn_copy(R->Z, Z3);
+	#endif
 }
 
 void sm2_jacobian_point_sub(SM2_JACOBIAN_POINT *R, const SM2_JACOBIAN_POINT *P, const SM2_JACOBIAN_POINT *Q)
@@ -1012,11 +1567,16 @@ void sm2_jacobian_point_mul(SM2_JACOBIAN_POINT *R, const SM2_BN k, const SM2_JAC
 	}
 
 	sm2_jacobian_point_set_infinity(Q);
-	sm2_bn_to_bits(k, bits);
-	for (i = 0; i < 256; i++) {
+	sm2_bn_to_NAF(k, bits);
+	for (i = 256; i>=0; i--)
+	{
 		sm2_jacobian_point_dbl(Q, Q);
-		if (bits[i] == '1') {
+		if (bits[i] == '+')
+		{
 			sm2_jacobian_point_add(Q, Q, P);
+		}
+		if(bits[i] == '-') {
+			sm2_jacobian_point_sub(Q, Q, P);
 		}
 	}
 	sm2_jacobian_point_copy(R, Q);

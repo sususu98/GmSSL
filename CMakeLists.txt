@@ -6,6 +6,7 @@ SET(CMAKE_PROJECT_HOMEPAGE_URL "http://gmssl.org")
 set(LIBRARY_OUTPUT_PATH ${PROJECT_BINARY_DIR}/bin)
 set(EXECUTABLE_OUTPUT_PATH ${PROJECT_BINARY_DIR}/bin)
 SET(CMAKE_MODULE_PATH "${CMAKE_MODULE_PATH};${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+SET(CMAKE_C_FLAGS_RELEASE "-O3")
 
 include_directories(include)
 
@@ -258,6 +259,11 @@ endif()
 #	list(APPEND src src/sm3_avx_bmi2.s)
 #endif()
 
+option(ENABLE_SM2_NEON "Enable SM2 NEON SUPPORT" OFF)
+if (ENABLE_SM2_NEON)
+	message(STATUS "ENABLE_SM2_NEON")
+	add_definitions(-DENABLE_SM2_NEON)
+endif()
 
 option(ENABLE_SM4_AESNI_AVX "Enable SM4 AESNI+AVX assembly implementation" OFF)
 if (ENABLE_SM4_AESNI_AVX)

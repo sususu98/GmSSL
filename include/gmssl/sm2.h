@@ -65,6 +65,11 @@ void sm2_fp_neg(SM2_Fp r, const SM2_Fp a);
 void sm2_fp_sqr(SM2_Fp r, const SM2_Fp a);
 void sm2_fp_inv(SM2_Fp r, const SM2_Fp a);
 int  sm2_fp_rand(SM2_Fp r);
+#ifdef ENABLE_SM2_NEON
+void sm2_fp_mul_neon(SM2_Fp r1, SM2_Fp r2, const SM2_Fp a1, const SM2_Fp b1, const SM2_Fp a2, const SM2_Fp b2);
+void sm2_512bit_modp(SM2_Fp r, const uint64_t a[16]);
+void mul_256bit_neon(uint32_t *T, uint32_t *T2, const uint64_t *A, const uint64_t *B, const uint64_t *A1, const uint64_t *B1);
+#endif
 
 int sm2_fp_sqrt(SM2_Fp r, const SM2_Fp a);
 

@@ -45,7 +45,7 @@ GmSSL项目的源代码在GitHub中发布和维护。
 
 通过查看这些CI的状态，可以判断当前代码是否可以在对应操作系统上成功编译。如果当前最新代码无法在某个平台上编译，那么可以选择之前某个通过测试的Commit版本。
 
-##配置编译选项
+## 配置编译选项
 
 在执行`cmake`阶段可以对项目的默认编译配置进行修改，修改是通过设置CMake变量来完成的，可以查看项目源代码中的`CMakeLists.txt`中所有的`option`指令来查看可选的配置。例如：
 
@@ -69,12 +69,18 @@ GmSSL包含了针对特定硬件和处理指令集的密码算法优化实现，
 
 在配置阶段可以显式地指定采用优化实现，可选的CMake配置变量包括：
 
+* `ENABLE_SM2_NEON` SM2算法基于ARM NEON指令集并行实现。
 * `ENABLE_SM3_AVX_BMI2`  SM3算法的AVX + BMI2指令集实现。
 * `ENABLE_SM3_X8_AVX2` SM3算法的AVX2指令集并行实现。
 * `ENABLE_SM3_X16_AVX512` SM3算法的AVX512指令集并行实现。
 * `ENABLE_SM4_AESNI_AVX` SM4算法的AESNI +AVX指令集实现。
 * `ENABLE_RDRND` 基于Intel RDRND指令的硬件随机数生成器。
 * `ENABLE_GF128_PCLMULQDQ` 基于Intel PCLMULQDQ指令的GCM模式实现。
+
+```bash
+cmake .. -DENABLE_SM2_NEON=ON -DENABLE_SM4_AESNI_AVX=ON
+make 
+```
 
 ### 编译不安全的密码算法
 
